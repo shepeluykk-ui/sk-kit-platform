@@ -1,0 +1,54 @@
+version: '3.9'
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: sk-kit-postgres
+    environment:
+      POSTGRES_USER: skkit_user
+      POSTGRES_PASSWORD: skkit_secure_password_change_in_production
+      POSTGRES_DB: skkit_production
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init-db.sh:/docker-entrypoint-initdb.d/init-db.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U skkit_user -d skkit_production"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - sk-kit-network
+    restart: unless-stopped
+
+  pgbouncer:
+    image: pgbouncer:latest
+    container_name: sk-kit-pgbouncer
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGBOUNCER_DATABASES: "skkit_production=host=postgres port=5432 user=skkit_user password=skkit_secure_password_change_in_production"
+      PGBOUNCER_POOL_MODE: "transaction"
+      PGBOUNCER_MAX_CLIENT_CONN: "1000"
+      PGBOUNCER_DEFAULT_POOL_SIZE: "25"
+      PGBOUNCER_MIN_POOL_SIZE: "10"
+      PGBOUNCER_RESERVE_POOL_SIZE: "5"
+      PGBOUNCER_RESERVE_POOL_TIMEOUT: "3"
+      PGBOUNCER_MAX_IDLE_TIME: "600"
+      PGBOUNCER_MAX_DB_CONNECTIONS: "100"
+    ports:
+      - "6432:6432"
+    networks:
+      - sk-kit-network
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+    driver: local
+
+networks:
+  sk-kit-network:
+    driver: bridge

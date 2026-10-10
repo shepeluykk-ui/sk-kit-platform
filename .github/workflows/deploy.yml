@@ -1,0 +1,230 @@
+name: Build & Deploy to Production
+
+on:
+  # master добавлена потому, что актуальный код публикуется именно в неё: с
+  # триггерами только на main проверки не выполнялись бы вовсе. main оставлена
+  # как ветка production-развёртывания.
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: skkit-production
+  ECS_SERVICE: skkit-production-service
+  ECS_CLUSTER: skkit-production-cluster
+
+jobs:
+  build-and-test:
+    name: Build & Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          # Согласовано с production: Dockerfile собирает и исполняет артефакт на
+          # node:24-alpine, package.json объявляет engines.node ">=24.19.0 <25.0.0".
+          # На Node 20 проверка сборки шла на версии, которая не способна
+          # запустить результат: src/server/database.ts импортирует node:sqlite,
+          # а в Node 20 такого встроенного модуля нет (ERR_UNKNOWN_BUILTIN_MODULE).
+          node-version: '24'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Проверки ниже обязательны. Раньше здесь стояло
+      # `npm run lint 2>/dev/null || true` и `npm test 2>/dev/null || true`:
+      # вывод уходил в /dev/null, код возврата подменялся успехом, а скрипта
+      # `test` в package.json не существовало вовсе — то есть тесты не
+      # запускались, и job оставался зелёным при любых ошибках.
+      - name: Typecheck
+        run: npm run lint
+
+      - name: Build application
+        run: npm run build
+
+      - name: Check build output
+        run: ls -la dist/
+
+      # Наборы, которые не требуют заранее поднятого сервера: автономные либо
+      # поднимающие собственный экземпляр. Порт 3000 общий, поэтому внутри
+      # скрипта они идут последовательно.
+      - name: Run orchestrator and ownership tests
+        run: npm test
+
+      # Наборам security и e2e нужен уже работающий сервер, и каждому —
+      # собственный, с чистой базой.
+      #
+      # Запускать их подряд на одном экземпляре нельзя: опыт показывает, что они
+      # взаимно загрязняют состояние, и второй по порядку всегда падает —
+      # e2e даёт 22/25 после security, security даёт 62/64 после e2e, тогда как
+      # на чистом экземпляре каждый проходит полностью. Поэтому сервер
+      # поднимается заново в отдельном рабочем каталоге под каждый набор: база
+      # создаётся там при старте и остаётся изолированной.
+      #
+      # Пароль — одноразовый, только для прогона; production-учётные данные в
+      # workflow не используются.
+      - name: Run HTTP test suites, each against a clean server
+        env:
+          NODE_ENV: production
+          SEED_USER_PASSWORD: ${{ secrets.CI_SEED_USER_PASSWORD || 'ci-ephemeral-run-password' }}
+          DATABASE_URL: ''
+        run: |
+          set -u
+          REPO="$PWD"
+          run_suite() {
+            SUITE="$1"
+            WORKDIR="$(mktemp -d)"
+            mkdir -p "$WORKDIR/data"
+            # exec замещает субшелл процессом node, поэтому $! — это PID самого
+            # сервера. Без exec остановить его не удаётся: $! указывает на
+            # субшелл, следующий набор идёт против прежнего экземпляра с уже
+            # загрязнённой базой и падает.
+            ( cd "$WORKDIR" && exec node "$REPO/dist/server.cjs" > "$WORKDIR/server.log" 2>&1 ) &
+            SERVER_PID=$!
+            for _ in $(seq 1 40); do
+              curl -fsS -o /dev/null http://127.0.0.1:3000/api/health && break
+              sleep 1
+            done
+            if ! curl -fsS -o /dev/null http://127.0.0.1:3000/api/health; then
+              echo "::error::Сервер не поднялся за 40 с (набор $SUITE)"
+              tail -40 "$WORKDIR/server.log"
+              kill "$SERVER_PID" 2>/dev/null || true
+              return 1
+            fi
+            npm run "$SUITE"
+            STATUS=$?
+            kill "$SERVER_PID" 2>/dev/null || true
+            wait "$SERVER_PID" 2>/dev/null || true
+            if [ "$STATUS" -ne 0 ]; then tail -40 "$WORKDIR/server.log"; fi
+            return "$STATUS"
+          }
+          run_suite test:security
+          run_suite test:e2e
+
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Run Snyk scan
+        uses: snyk/actions/node@master
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        continue-on-error: true
+
+  docker-build:
+    name: Build Docker Image
+    runs-on: ubuntu-latest
+    needs: [ build-and-test ]
+    # Публикация образа в ECR выполняется только с ветки production: этот job
+    # требует AWS-учётных данных из secrets, и на ветке разработки он падал бы
+    # по отсутствию доступа, а не по состоянию кода. Контур проверок
+    # (build-and-test, security-scan) при этом выполняется на обеих ветках.
+    if: github.ref == 'refs/heads/main'
+
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+
+      - name: Build, tag, and push image to Amazon ECR
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+          docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+
+      - name: Output image URI
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          echo "IMAGE_URI=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_ENV
+          echo "Image pushed: $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+
+  deploy-to-ecs:
+    name: Deploy to ECS
+    runs-on: ubuntu-latest
+    needs: [ docker-build ]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Update ECS service
+        run: |
+          aws ecs update-service \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --service ${{ env.ECS_SERVICE }} \
+            --force-new-deployment \
+            --region ${{ env.AWS_REGION }}
+
+      - name: Wait for deployment
+        run: |
+          aws ecs wait services-stable \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --services ${{ env.ECS_SERVICE }} \
+            --region ${{ env.AWS_REGION }}
+
+  notify-slack:
+    name: Notify Slack
+    runs-on: ubuntu-latest
+    needs: [ deploy-to-ecs ]
+    if: always()
+
+    steps:
+      - name: Send Slack notification
+        uses: slackapi/slack-github-action@v1
+        with:
+          webhook-url: ${{ secrets.SLACK_WEBHOOK }}
+          payload: |
+            {
+              "text": "SK-KIT Deployment: ${{ job.status }}",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "*SK-KIT Production Deploy*\nStatus: *${{ job.status }}*\nCommit: <${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}|${{ github.sha }}>\nBranch: ${{ github.ref_name }}"
+                  }
+                }
+              ]
+            }
+        if: always()

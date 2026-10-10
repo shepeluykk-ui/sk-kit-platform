@@ -1,0 +1,66 @@
+# SK-КИТ — правила игнорирования.
+#
+# Намеренно НЕ содержит правил вида /src/*, /tests/*, /docs/, /.github/.
+# В прежнем репозитории такие правила приводили к тому, что новые файлы
+# исходного кода молча не попадали в коммит: src/server/genaiCircuitBreaker.ts
+# отсутствовал в публикации, из-за чего ни typecheck, ни сборка не проходили.
+# Исходный код, тесты, документация и конфигурация CI/CD отслеживаются всегда.
+
+# Зависимости и артефакты сборки
+node_modules/
+dist/
+build/
+out/
+*.tsbuildinfo
+
+# Секреты и локальная конфигурация окружения.
+# .env.example остаётся в репозитории как шаблон.
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# Рабочие данные приложения: база SQLite создаётся при старте
+# (src/server/database.ts, process.cwd()/data) и содержит реальные записи.
+data/
+backups/
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# Загруженные пользователями документы
+uploads/
+!uploads/documents/.gitkeep
+
+# Логи и временные файлы
+logs/
+*.log
+npm-debug.log*
+tmp/
+temp/
+.cache/
+.turbo/
+
+# Локальные настройки инструментов и редакторов
+.claude/settings.local.json
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Мобильная сборка Capacitor: платформенные артефакты
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+ios/App/build/
+ios/App/Pods/
+
+# Покрытие тестами
+coverage/
+.nyc_output/
