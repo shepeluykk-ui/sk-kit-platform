@@ -126,11 +126,12 @@ jobs:
     name: Build Docker Image
     runs-on: ubuntu-latest
     needs: [ build-and-test ]
-    # Публикация образа в ECR выполняется только с ветки production: этот job
-    # требует AWS-учётных данных из secrets, и на ветке разработки он падал бы
-    # по отсутствию доступа, а не по состоянию кода. Контур проверок
-    # (build-and-test, security-scan) при этом выполняется на обеих ветках.
-    if: github.ref == 'refs/heads/main'
+    # Публикация образа в ECR требует AWS-учётных данных. Без настроенного
+    # AWS_ROLE_ARN job падал на шаге Configure AWS credentials — то есть по
+    # отсутствию инфраструктуры, а не по состоянию кода, и красный прогон
+    # перестал отличать поломку от ненастроенного развёртывания. Условие по
+    # секрету включает этот job сам, как только доступ появится.
+    if: github.ref == 'refs/heads/main' && secrets.AWS_ROLE_ARN != ''
 
     permissions:
       contents: read
@@ -172,7 +173,7 @@ jobs:
     name: Deploy to ECS
     runs-on: ubuntu-latest
     needs: [ docker-build ]
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push' && secrets.AWS_ROLE_ARN != ''
 
     permissions:
       contents: read
@@ -207,7 +208,9 @@ jobs:
     name: Notify Slack
     runs-on: ubuntu-latest
     needs: [ deploy-to-ecs ]
-    if: always()
+    # always() заставляло job выполняться даже когда развёртывания не было, и
+    # без SLACK_WEBHOOK он падал, делая прогон красным при зелёных проверках.
+    if: always() && secrets.SLACK_WEBHOOK != ''
 
     steps:
       - name: Send Slack notification
