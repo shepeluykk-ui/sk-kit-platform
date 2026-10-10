@@ -1,6 +1,9 @@
 # SK-КИТ — правила игнорирования.
 #
 # Намеренно НЕ содержит правил вида /src/*, /tests/*, /docs/, /.github/.
+# Правила каталогов записаны с ведущим слешем: без него шаблон вида "data/"
+# матчит одноимённый каталог на любом уровне, и src/data/initialData.ts
+# выпадал из публикации — typecheck в CI падал с TS2307.
 # В прежнем репозитории такие правила приводили к тому, что новые файлы
 # исходного кода молча не попадали в коммит: src/server/genaiCircuitBreaker.ts
 # отсутствовал в публикации, из-за чего ни typecheck, ни сборка не проходили.
@@ -8,9 +11,9 @@
 
 # Зависимости и артефакты сборки
 node_modules/
-dist/
-build/
-out/
+/dist/
+/build/
+/out/
 *.tsbuildinfo
 
 # Секреты и локальная конфигурация окружения.
@@ -22,8 +25,8 @@ out/
 
 # Рабочие данные приложения: база SQLite создаётся при старте
 # (src/server/database.ts, process.cwd()/data) и содержит реальные записи.
-data/
-backups/
+/data/
+/backups/
 *.db
 *.db-wal
 *.db-shm
@@ -31,15 +34,15 @@ backups/
 *.sqlite3
 
 # Загруженные пользователями документы
-uploads/
+/uploads/
 !uploads/documents/.gitkeep
 
 # Логи и временные файлы
-logs/
+/logs/
 *.log
 npm-debug.log*
-tmp/
-temp/
+/tmp/
+/temp/
 .cache/
 .turbo/
 
@@ -62,5 +65,5 @@ ios/App/build/
 ios/App/Pods/
 
 # Покрытие тестами
-coverage/
+/coverage/
 .nyc_output/
